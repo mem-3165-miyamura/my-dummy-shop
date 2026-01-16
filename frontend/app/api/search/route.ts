@@ -8,15 +8,17 @@ export async function GET(request: Request) {
   try {
     const response = await esClient.search({
       index: 'products',
+      // 🟢 queryがある場合、部分一致（wildcard）で検索するように変更
       query: query 
-        ? { 
-            multi_match: { 
-              query, 
-              fields: ['name', 'description'],
-              fuzziness: "AUTO",
-              operator: "and" 
-            } 
-          } 
+        ? {
+            bool: {
+              should: [
+                { wildcard: { name: `*${query}*` } },        // 名前の一部に含まれる
+                { wildcard: { description: `*${query}*` } }, // 説明の一部に含まれる
+                { match: { name: { query, boost: 2 } } }      // 完全一致に近いものはスコアを高く
+              ]
+            }
+          }
         : { match_all: {} },
       
       aggs: {
@@ -26,20 +28,18 @@ export async function GET(request: Request) {
       }
     });
 
-    // ポイント：商品データに「スコア」を合体させて返します
     const products = response.hits.hits.map((hit) => ({
       ...(hit._source as object),
-      _score: hit._score // Elasticsearchが算出した「近さ」の点数
+      _score: hit._score
     }));
     
     const aggregations = response.aggregations?.category_counts;
 
-    // フロントエンドのデバッグパネル用に、検索にかかった時間等も返します
     return NextResponse.json({ 
       products, 
       aggregations,
       debug: {
-        took: response.took,           // Elasticsearch内での処理ミリ秒
+        took: response.took,
         max_score: response.hits.max_score,
         total_hits: response.hits.total
       }
