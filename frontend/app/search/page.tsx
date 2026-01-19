@@ -1,128 +1,157 @@
 "use client";
+
 import { useState, useEffect, Suspense } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 function SearchContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const initialQuery = searchParams.get("q") || "";
   
-  const [products, setProducts] = useState<any[]>([]);
-  const [aggs, setAggs] = useState<any[]>([]);
-  const [query, setQuery] = useState(initialQuery);
-  const [isTyping, setIsTyping] = useState(false);
+  const [data, setData] = useState<any>({ products: [], aggregations: { buckets: [] } });
+  const [loading, setLoading] = useState(true);
+  
+  const query = searchParams.get("q") || "";
+  const currentCategory = searchParams.get("category") || "";
 
-  const fetchResults = async (q: string) => {
-    try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      if (!res.ok) throw new Error("Search failed");
-      const data = await res.json();
-      setProducts(data.products || []);
-      setAggs(data.aggregations?.buckets || []);
-    } catch (error) {
-      console.error("Search fetch error:", error);
-    } finally {
-      setIsTyping(false);
+  // 1. 入力欄の即時反映用ステート
+  const [inputValue, setInputValue] = useState(query);
+
+  // 🟢 2. デバウンス処理の実装
+  useEffect(() => {
+    // 初回レンダリング時や、URLのqueryとinputValueが同じ時は何もしない
+    if (inputValue === query) return;
+
+    // タイマーを設定（500ms）
+    const timer = setTimeout(() => {
+      updateSearch(inputValue, currentCategory);
+    }, 500);
+
+    // 次の入力があったら前のタイマーをキャンセルする
+    return () => clearTimeout(timer);
+  }, [inputValue]); // inputValueが変わるたびに実行
+
+  // URLが変わるたびにデータを再取得（ここは変更なし）
+  useEffect(() => {
+    setInputValue(query); 
+    setLoading(true);
+    fetch(`/api/search?${searchParams.toString()}`)
+      .then((res) => res.json())
+      .then((json) => {
+        setData({
+          products: json.products || [],
+          aggregations: json.aggregations || { buckets: [] }
+        });
+        setLoading(false);
+      });
+  }, [searchParams, query]);
+
+  const updateSearch = (newQ: string | null, newCat: string | null) => {
+    const params = new URLSearchParams();
+    if (newQ) params.set("q", newQ);
+    if (newCat) params.set("category", newCat);
+
+    const queryString = params.toString();
+    router.push(queryString ? `/search?${queryString}` : "/search");
+  };
+
+  const toggleCategory = (categoryKey: string) => {
+    if (currentCategory === categoryKey) {
+      updateSearch(inputValue, null);
+    } else {
+      updateSearch(inputValue, categoryKey);
     }
   };
 
-  // 🟢 1. URLのパラメータ（initialQuery）が変わった時に同期する
-  // これによりヘッダーからの検索が反映されます
-  useEffect(() => {
-    setQuery(initialQuery);
-    fetchResults(initialQuery);
-  }, [initialQuery]);
-
-  // ✅ 2. 入力に対するデバウンス処理
-  // ユーザーがページ内の入力欄で文字を打つのを止めてから300ms後に実行
-  useEffect(() => {
-    // URLと現在の入力が同じで、かつ既にデータがある場合はスキップ
-    if (query === initialQuery && products.length > 0) return;
-
-    const timer = setTimeout(() => {
-      fetchResults(query);
-      
-      // URLのクエリパラメータも同期
-      const params = new URLSearchParams(window.location.search);
-      if (query) {
-        params.set("q", query);
-      } else {
-        params.delete("q");
-      }
-      router.replace(`/search?${params.toString()}`, { scroll: false });
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [query, router]);
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    // エンター時も即座に反映させる（タイマーを待たない）
+    updateSearch(inputValue, currentCategory);
+  };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto flex gap-8">
-      {/* 左：集計（アグリゲーション） */}
-      <aside className="w-64">
-        <h2 className="font-bold border-b pb-2 mb-4 text-gray-400 uppercase tracking-widest text-[10px]">Filter / Category</h2>
-        <ul className="space-y-3">
-          {aggs.length > 0 ? (
-            aggs.map(b => (
-              <li key={b.key} className="flex justify-between text-sm group cursor-pointer">
-                <span className="text-gray-700 group-hover:text-blue-600 transition-colors font-medium">{b.key}</span>
-                <span className="bg-gray-100 px-2 rounded-full text-gray-500 text-[10px] flex items-center">{b.doc_count}</span>
+    <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
+      <form onSubmit={handleSearch} className="flex gap-2">
+        <input
+          type="text"
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          placeholder="タイピングして自動検索..."
+          className="border p-2 flex-1 rounded shadow-sm focus:ring-2 focus:ring-blue-500 outline-none"
+        />
+        <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-bold hover:bg-blue-700 transition-colors">
+          検索
+        </button>
+      </form>
+
+      {/* 以下、サイドバーとメイン結果部分は変更なし */}
+      <div className="flex flex-col md:flex-row gap-8">
+        <aside className="w-full md:w-64">
+          <h2 className="font-bold mb-4 text-gray-800 border-b pb-2 flex justify-between items-center">
+            カテゴリ
+            {currentCategory && (
+              <button 
+                onClick={() => updateSearch(inputValue, null)}
+                className="text-[10px] text-red-500 font-normal hover:underline"
+              >
+                クリア
+              </button>
+            )}
+          </h2>
+          <ul className="space-y-1">
+            {data.aggregations.buckets?.map((bucket: any) => (
+              <li key={bucket.key}>
+                <button
+                  type="button"
+                  onClick={() => toggleCategory(bucket.key)}
+                  className={`w-full text-left px-3 py-2 rounded transition-all flex justify-between items-center ${
+                    currentCategory === bucket.key 
+                      ? "bg-blue-600 text-white shadow-md font-bold" 
+                      : "hover:bg-gray-100 text-gray-700"
+                  }`}
+                >
+                  <span className="text-sm">{bucket.key}</span>
+                  <span className={`text-xs ${currentCategory === bucket.key ? "text-blue-100" : "text-gray-400"}`}>
+                    ({bucket.doc_count})
+                  </span>
+                </button>
               </li>
-            ))
-          ) : (
-            <p className="text-xs text-gray-300 italic">No categories</p>
-          )}
-        </ul>
-      </aside>
+            ))}
+          </ul>
+        </aside>
 
-      {/* 右：検索結果 */}
-      <main className="flex-1">
-        <div className="mb-12 relative">
-          <input 
-            type="text" 
-            value={query}
-            placeholder="Search products..."
-            onChange={(e) => {
-              setQuery(e.target.value);
-              setIsTyping(true);
-            }}
-            className="w-full border-b-2 border-black p-2 text-4xl outline-none placeholder:text-gray-100 focus:border-blue-500 transition-all font-light"
-          />
-          <div className="flex items-center gap-2 mt-4">
-            <span className={`inline-block w-1.5 h-1.5 rounded-full ${isTyping ? 'bg-blue-500 animate-pulse' : 'bg-gray-200'}`}></span>
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
-              {isTyping ? "Fetching..." : `${products.length} Results Found`}
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-x-12 gap-y-16">
-          {products.map(p => (
-            <div key={p.id} className="group cursor-pointer">
-              <div className="bg-gray-50 aspect-[3/4] mb-6 flex items-center justify-center text-gray-200 group-hover:bg-gray-100 transition-all duration-500 relative">
-                <span className="text-[9px] tracking-[0.2em] uppercase font-bold">Preview</span>
-              </div>
-              <div className="space-y-1">
-                <h3 className="font-bold text-lg text-gray-900 group-hover:text-blue-600 transition-colors">{p.name}</h3>
-                <p className="text-gray-400 text-xs line-clamp-1 font-medium">{p.description}</p>
-                <p className="font-black text-gray-900 pt-2 text-md italic tracking-tighter">¥{p.price.toLocaleString()}</p>
-              </div>
+        <main className="flex-1">
+          {loading ? (
+            <div className="text-center py-20 text-gray-400 animate-pulse">
+              {inputValue ? `「${inputValue}」を検索中...` : "読み込み中..."}
             </div>
-          ))}
-        </div>
-
-        {!isTyping && products.length === 0 && (
-          <div className="h-64 flex flex-col items-center justify-center border-2 border-dashed border-gray-100 rounded-3xl mt-12">
-            <p className="text-gray-300 font-black uppercase tracking-widest text-xs">No Items Found</p>
-          </div>
-        )}
-      </main>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              {data.products.map((p: any) => (
+                <div key={p.id} className="border p-5 rounded-xl bg-white shadow-sm border-gray-100 hover:shadow-md transition-shadow">
+                  <span className="text-[10px] uppercase tracking-widest bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold">
+                    {p.category}
+                  </span>
+                  <h3 className="font-bold mt-3 text-lg">{p.name}</h3>
+                  <p className="text-gray-500 text-sm mt-2 line-clamp-2">{p.description}</p>
+                  <p className="font-black text-xl mt-4 text-gray-900">¥{Number(p.price).toLocaleString()}</p>
+                </div>
+              ))}
+              {data.products.length === 0 && (
+                <div className="col-span-full text-center py-20 bg-gray-50 rounded-xl">
+                  <p className="text-gray-400">「{query}」に一致する商品は見つかりませんでした。</p>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }
 
 export default function SearchPage() {
   return (
-    <Suspense fallback={<div className="p-8 text-center text-gray-300 font-bold animate-pulse text-xs uppercase tracking-[0.3em]">Loading View...</div>}>
+    <Suspense fallback={<div>Loading...</div>}>
       <SearchContent />
     </Suspense>
   );

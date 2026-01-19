@@ -2,19 +2,22 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation'; // 追加
+import { useRouter, usePathname } from 'next/navigation'; // usePathname を追加
 import { ShoppingCart, User, Search } from 'lucide-react';
 
 const Header = () => {
   const [keyword, setKeyword] = useState("");
   const router = useRouter();
+  const pathname = usePathname(); // 現在のURLパスを取得
 
-  // 検索実行時の処理
+  // 🟢 検索ページ (/search) にいるかどうかを判定
+  const isSearchPage = pathname === "/search";
+
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (keyword.trim()) {
-      // 検索ページへ遷移し、クエリパラメータを付与
       router.push(`/search?q=${encodeURIComponent(keyword)}`);
+      setKeyword(""); // 検索実行後にヘッダーの入力欄をクリア
     }
   };
 
@@ -36,17 +39,20 @@ const Header = () => {
         
         {/* 右側：検索・ユーザー・カート */}
         <div className="flex items-center gap-4">
-          {/* 検索バー：formタグで囲むことでEnterキーでの送信を可能にします */}
-          <form onSubmit={handleSearch} className="relative hidden lg:block">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <input
-              type="search"
-              placeholder="商品を検索..."
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              className="h-10 w-64 rounded-full border border-gray-200 bg-gray-50 pl-10 pr-4 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"
-            />
-          </form>
+          
+          {/* 🟢 検索ページ以外の場合のみ、ヘッダーの検索バーを表示 */}
+          {!isSearchPage && (
+            <form onSubmit={handleSearch} className="relative hidden lg:block">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+              <input
+                type="search"
+                placeholder="商品を検索..."
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                className="h-10 w-64 rounded-full border border-gray-200 bg-gray-50 pl-10 pr-4 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"
+              />
+            </form>
+          )}
 
           {/* アイコンボタン類 */}
           <div className="flex items-center gap-2">
