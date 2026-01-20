@@ -5,11 +5,40 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
   const category = searchParams.get('category');
+  const lat = searchParams.get('lat');
+  const lon = searchParams.get('lon');
 
   try {
+    const scoreFunctions: any[] = [
+      {
+        filter: { term: { isSale: true } },
+        weight: 2
+      },
+      {
+        field_value_factor: {
+          field: "priority",
+          factor: 1.0,
+          missing: 1
+        }
+      }
+    ];
+
+    if (lat && lon) {
+      scoreFunctions.push({
+        gauss: {
+          location: {
+            origin: { lat: parseFloat(lat), lon: parseFloat(lon) },
+            offset: "2km",
+            scale: "10km"
+          }
+        },
+        weight: 3
+      });
+    }
+
+    // 🟢 検索クエリの構築
     const searchQuery: any = {
       function_score: {
-        // 1. ベースとなる検索（キーワードの適合度）
         query: {
           bool: {
             must: query 
@@ -18,8 +47,7 @@ export async function GET(request: Request) {
                     bool: {
                       should: [
                         { match: { name: { query, boost: 5 } } },
-                        { match: { description: { query, boost: 1 } } },
-                        { wildcard: { name: `*${query}*` } }
+                        { match: { description: { query, boost: 1 } } }
                       ]
                     }
                   }
@@ -27,46 +55,28 @@ export async function GET(request: Request) {
               : [{ match_all: {} }],
             
             filter: category 
-              ? [{ term: { "category.keyword": category } }] 
+              ? [{ term: { category: category } }] 
               : []
           }
         },
-        // 2. ビジネスロジック：フラグや数値によるスコア調整
-        functions: [
-          {
-            // 🟢 カテゴリ名だけでなく、isSaleフラグ(boolean)がtrueなら2倍
-            filter: { term: { isSale: true } },
-            weight: 2
-          },
-          {
-            // 🟢 priorityフィールドの値を直接スコアに反映（missing: 1 で未設定時をカバー）
-            field_value_factor: {
-              field: "priority",
-              factor: 1.0,
-              missing: 1
-            }
-          },
-          {
-            // 価格が高いものを少しだけ優遇
-            field_value_factor: {
-              field: "price",
-              factor: 0.0001,
-              modifier: "log1p",
-              missing: 1
-            }
-          }
-        ],
+        functions: scoreFunctions,
         score_mode: "multiply", 
         boost_mode: "multiply"
       }
     };
 
+    // 🟢 Elasticsearch実行 (body プロパティの中に query と aggs を入れる)
     const response = await esClient.search({
       index: 'products',
-      query: searchQuery,
-      aggs: {
-        category_counts: {
-          terms: { field: "category.keyword" } 
+      body: {
+        query: searchQuery,
+        aggs: {
+          category_counts: {
+            terms: { 
+              field: "category",
+              size: 50 
+            } 
+          }
         }
       }
     });
@@ -76,11 +86,18 @@ export async function GET(request: Request) {
       _score: hit._score
     }));
     
-    const aggregations = response.aggregations?.category_counts;
+    // 🟢 アグリゲーション結果の整形
+    const categoryBuckets = (response.aggregations?.category_counts as any)?.buckets || [];
+    const formattedCategories = categoryBuckets.map((b: any) => ({
+      name: b.key,
+      count: b.doc_count
+    }));
 
+    // フロントエンドが "categories" だけでなく "aggregations" という名前も期待している可能性があるため両方返します
     return NextResponse.json({ 
       products, 
-      aggregations,
+      categories: formattedCategories,
+      aggregations: formattedCategories, 
       debug: {
         total: response.hits.total,
         max_score: response.hits.max_score
@@ -88,7 +105,6 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     console.error('Elasticsearch Search Error:', error);
-    // エラー時は500を返し、詳細を文字列化して返す
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }
