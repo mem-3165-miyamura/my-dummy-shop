@@ -11,19 +11,14 @@ export async function GET(request: Request) {
   const category = searchParams.get("category");
   const lat = searchParams.get("lat");
   const lon = searchParams.get("lon");
-
-  // localStorage由来の「推しカテゴリ」
   const preferredCategory = searchParams.get("pref");
 
   try {
     const scoreFunctions: any[] = [
-      // SALEボーナス
       { filter: { term: { isSale: true } }, weight: 1000 },
-      // 優先度ボーナス
       { field_value_factor: { field: "priority", factor: 1.0, missing: 0 } },
     ];
 
-    // 推しカテゴリブースト
     if (preferredCategory) {
       scoreFunctions.push({
         filter: { term: { category: String(preferredCategory) } },
@@ -31,15 +26,6 @@ export async function GET(request: Request) {
       });
     }
 
-    // 選択中カテゴリブースト（これがなかったためスコア変化がなかった）
-    if (category) {
-      scoreFunctions.push({
-        filter: { term: { category: String(category) } },
-        weight: 1000,
-      });
-    }
-
-    // ジオブースト
     if (lat && lon) {
       scoreFunctions.push({
         gauss: {
@@ -53,9 +39,20 @@ export async function GET(request: Request) {
       });
     }
 
+    // 📍 物理的なフィルタリング条件（post_filter用）
+    const filterClauses: any[] = [];
+    if (category) {
+      if (category === "SALE") {
+        filterClauses.push({ term: { isSale: true } });
+      } else {
+        filterClauses.push({ term: { category: String(category) } });
+      }
+    }
+
     const esQuery: any = {
       index: "products",
       body: {
+        // 1. 検索ワードによる基本クエリとスコアリング
         query: {
           function_score: {
             query: {
@@ -71,8 +68,8 @@ export async function GET(request: Request) {
                       },
                     ]
                   : [{ match_all: {} }],
-                // filterはスコアに影響しないため、カテゴリブーストはfunction_score側で対応
-                filter: [],
+                // 📍 ここではフィルタをかけない（集計対象を減らさないため）
+                filter: [], 
               },
             },
             functions: scoreFunctions,
@@ -80,6 +77,14 @@ export async function GET(request: Request) {
             boost_mode: "sum",
           },
         },
+        // 📍 2. 【重要】商品の「表示」だけを最後に絞り込む
+        // これにより、aggs（集計）には影響を与えず、商品一覧だけが変わります。
+        post_filter: {
+          bool: {
+            filter: filterClauses
+          }
+        },
+        // 3. ハイライト設定
         highlight: {
           fields: {
             name: {},
@@ -88,6 +93,8 @@ export async function GET(request: Request) {
           pre_tags: ["<b class='text-blue-600 font-bold'>"],
           post_tags: ["</b>"],
         },
+        // 4. カテゴリ集計
+        // post_filterのおかげで、ここには「絞り込み前」の母数が届きます。
         aggs: {
           categories: {
             terms: { field: "category", size: 50 },
@@ -95,8 +102,6 @@ export async function GET(request: Request) {
         },
       },
     };
-
-    console.log("[ES Query]", JSON.stringify(esQuery, null, 2)); // デバッグ用
 
     const response = await client.search(esQuery);
 
@@ -117,7 +122,10 @@ export async function GET(request: Request) {
   } catch (error) {
     console.error("Elasticsearch Search Error:", error);
     return NextResponse.json(
-      { error: "検索に失敗しました", details: error instanceof Error ? error.message : String(error) },
+      { 
+        error: "検索に失敗しました", 
+        details: error instanceof Error ? error.message : String(error) 
+      },
       { status: 500 }
     );
   }
