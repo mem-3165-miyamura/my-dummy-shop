@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, Suspense, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
 function SearchContent() {
@@ -9,171 +9,201 @@ function SearchContent() {
   
   const [data, setData] = useState<any>({ products: [], aggregations: [] });
   const [loading, setLoading] = useState(true);
+  const [activePromo, setActivePromo] = useState<any>(null);
   
   const query = searchParams.get("q") || "";
   const currentCategory = searchParams.get("category") || "";
+  const currentSort = searchParams.get("sort") || "recommended";
 
   const [inputValue, setInputValue] = useState(query);
 
-  // 📍 お気に入りカテゴリを取得する関数（localStorageから計算）
+  // 依存配列の安定化（Reactのエラー対策）
+  const searchParamsKey = searchParams.toString();
+
   const getPreferredCategory = () => {
     if (typeof window === "undefined") return null;
     const history = JSON.parse(localStorage.getItem("search_history") || "{}");
-    // カウントが最大のもの（かつ1回以上クリックされているもの）を抽出
     const sorted = Object.entries(history).sort((a: any, b: any) => b[1] - a[1]);
     return sorted.length > 0 ? sorted[0][0] : null;
   };
 
-  // 📍 クリックを追跡して好みを保存する関数
-  const trackClick = (category: string) => {
-    const history = JSON.parse(localStorage.getItem("search_history") || "{}");
-    history[category] = (history[category] || 0) + 1;
-    localStorage.setItem("search_history", JSON.stringify(history));
-    console.log("Preference updated:", category, history[category]);
-  };
-
-  useEffect(() => {
-    if (inputValue === query) return;
-    const timer = setTimeout(() => {
-      updateSearch(inputValue, currentCategory);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [inputValue, query, currentCategory]);
-
-  useEffect(() => {
-    setInputValue(query); 
+  // 📍 SaaS解析と商品検索を統合したメインロジック
+  const trackAndSearch = useCallback(async () => {
     setLoading(true);
-    
-    // 📍 検索パラメータの構築
-    const params = new URLSearchParams(searchParams.toString());
-    
-    // 📍 パーソナライズ用パラメータ 'pref' を付与
+    const params = new URLSearchParams(searchParamsKey);
     const pref = getPreferredCategory();
     if (pref) params.set("pref", pref);
-    
-    fetch(`/api/products/search?${params.toString()}`)
-      .then((res) => res.json())
-      .then((json) => {
-        setData({
-          products: json.products || [],
-          aggregations: json.categories || [] 
-        });
-        setLoading(false);
+
+    try {
+      // 1. SaaS(3001番)への問い合わせ：今の検索条件から「出すべきポップアップ」を仰ぐ
+      const trackRes = await fetch("http://localhost:3001/api/v1/track", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: "search_view",
+          vid: "guest_user_001",
+          userId: "admin_1",
+          properties: { q: query, sort: currentSort }
+        })
       });
-  }, [searchParams, query]);
+      const trackData = await trackRes.json();
 
-  const updateSearch = (newQ: string | null, newCat: string | null) => {
-    const params = new URLSearchParams();
-    if (newQ) params.set("q", newQ);
-    if (newCat) params.set("category", newCat);
-    const queryString = params.toString();
-    router.push(queryString ? `/search?${queryString}` : "/search");
-  };
+      // インサイト判定があればセット（なければクリア）
+      if (trackData.action?.displayPopUp) {
+        setActivePromo({
+          ...trackData.action.displayPopUp,
+          isInsight: trackData.action.isInsightTriggered
+        });
+      } else {
+        setActivePromo(null);
+      }
 
-  const toggleCategory = (categoryKey: string) => {
-    // カテゴリ選択時も「好み」としてカウント
-    trackClick(categoryKey);
-    if (currentCategory === categoryKey) {
-      updateSearch(inputValue, null);
-    } else {
-      updateSearch(inputValue, categoryKey);
+      // 2. 解析されたスコアを検索クエリに乗せる
+      if (trackData.insights?.price_sensitivity) {
+        params.set("price_sensitivity", trackData.insights.price_sensitivity);
+      }
+
+      // 3. 商品検索の実行
+      const res = await fetch(`/api/products/search?${params.toString()}`);
+      const json = await res.json();
+      setData({ products: json.products || [], aggregations: json.categories || [] });
+    } catch (err) {
+      console.error("Sync Error:", err);
+    } finally {
+      setLoading(false);
     }
-  };
+  }, [searchParamsKey, query, currentSort]);
 
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    updateSearch(inputValue, currentCategory);
+  useEffect(() => {
+    setInputValue(query);
+    trackAndSearch();
+  }, [trackAndSearch, query]);
+
+  const updateSearch = (newQ: string | null, newCat: string | null, newSort: string | null) => {
+    const params = new URLSearchParams();
+    if (newQ) params.set("q", newQ || "");
+    if (newCat) params.set("category", newCat);
+    if (newSort && newSort !== "recommended") params.set("sort", newSort);
+
+    // ソート変更時は明示的にイベント送信（加減算のため）
+    if (newSort !== currentSort) {
+      fetch("http://localhost:3001/api/v1/track", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: "change_sort",
+          vid: "guest_user_001",
+          userId: "admin_1",
+          properties: { sort_type: newSort }
+        })
+      });
+    }
+
+    router.push(`/search?${params.toString()}`);
   };
 
   return (
-    <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
-      <form onSubmit={handleSearch} className="flex gap-2">
+    <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto relative">
+      
+      {/* 📍 インサイト連動型ポップアップUI */}
+      {activePromo && (
+        <div className="fixed bottom-10 right-10 z-50 transform transition-all hover:scale-105">
+          <div className={`p-6 rounded-3xl shadow-2xl max-w-sm border-4 ${
+            activePromo.isInsight 
+              ? "border-orange-500 bg-white ring-8 ring-orange-500/10" 
+              : "border-gray-100 bg-white"
+          }`}>
+            <button onClick={() => setActivePromo(null)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">✕</button>
+            
+            {activePromo.isInsight && (
+              <div className="flex items-center gap-2 mb-3">
+                <span className="bg-orange-500 text-white text-[10px] font-black px-2 py-0.5 rounded-full animate-pulse">
+                  INSIGHT MATCH
+                </span>
+                <span className="text-[10px] text-orange-600 font-bold">検索傾向から提案</span>
+              </div>
+            )}
+
+            <h4 className="font-black text-xl mb-1 text-gray-800">{activePromo.title}</h4>
+            <p className="text-sm text-gray-600 mb-5 leading-relaxed">{activePromo.description}</p>
+            
+            <button className={`w-full font-bold py-3 rounded-xl shadow-lg transition-all active:scale-95 ${
+              activePromo.isInsight 
+                ? "bg-orange-500 text-white hover:bg-orange-600" 
+                : "bg-blue-600 text-white hover:bg-blue-700"
+            }`}>
+              {activePromo.buttonText || "今すぐチェック"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 検索フォーム */}
+      <form onSubmit={(e) => { e.preventDefault(); updateSearch(inputValue, currentCategory, currentSort); }} className="flex gap-2">
         <input
           type="text"
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           placeholder="検索..."
-          className="border p-2 flex-1 rounded shadow-sm outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+          className="border p-3 flex-1 rounded-2xl shadow-inner outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50/50"
         />
-        <button type="submit" className="bg-blue-600 text-white px-6 py-2 rounded font-bold hover:bg-blue-700 transition-colors">
-          検索
-        </button>
+        <button type="submit" className="bg-gray-900 text-white px-8 py-3 rounded-2xl font-bold hover:bg-black transition-all shadow-lg">検索</button>
       </form>
 
       <div className="flex flex-col md:flex-row gap-8">
-        {/* サイドバー: カテゴリ集計 */}
         <aside className="w-full md:w-64 shrink-0">
-          <h2 className="font-bold mb-4 text-gray-800 border-b pb-2 flex justify-between items-center">
-            カテゴリ
-            {currentCategory && (
-              <button onClick={() => updateSearch(inputValue, null)} className="text-[10px] text-red-500 hover:underline">クリア</button>
-            )}
-          </h2>
+          <h2 className="font-bold mb-4 text-gray-800 border-b pb-2">カテゴリ</h2>
           <ul className="space-y-1">
             {data.aggregations?.map((cat: any) => (
               <li key={cat.name}>
                 <button
-                  type="button"
-                  onClick={() => toggleCategory(cat.name)}
-                  className={`w-full text-left px-3 py-2 rounded transition-all flex justify-between items-center ${
-                    currentCategory === cat.name 
-                      ? "bg-blue-600 text-white shadow-md font-bold" 
-                      : "hover:bg-gray-100 text-gray-700"
-                  }`}
+                  onClick={() => updateSearch(inputValue, cat.name, currentSort)}
+                  className={`w-full text-left px-3 py-2 rounded-xl text-sm transition-all ${currentCategory === cat.name ? "bg-gray-900 text-white font-bold shadow-md" : "hover:bg-gray-100 text-gray-600"}`}
                 >
-                  <span className="text-sm">{cat.name}</span>
-                  <span className={`text-xs ${currentCategory === cat.name ? "text-blue-100" : "text-gray-400"}`}>
-                    ({cat.count})
-                  </span>
+                  {cat.name} <span className="text-[10px] opacity-50 ml-1">({cat.count})</span>
                 </button>
               </li>
             ))}
           </ul>
         </aside>
 
-        {/* メイン: 検索結果 */}
         <main className="flex-1">
+          <div className="flex justify-between items-center mb-6">
+            <p className="text-xs text-gray-400 font-bold tracking-widest uppercase">{data.products.length} Results</p>
+            <select 
+              value={currentSort}
+              onChange={(e) => updateSearch(inputValue, currentCategory, e.target.value)}
+              className="border bg-white text-xs font-bold p-2 rounded-xl shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="recommended">おすすめ順</option>
+              <option value="price_asc">価格の安い順</option>
+              <option value="price_desc">価格の高い順</option>
+            </select>
+          </div>
+
           {loading ? (
-            <div className="text-center py-20 text-gray-400 animate-pulse">読み込み中...</div>
+            <div className="grid grid-cols-2 gap-6 opacity-20 animate-pulse">
+              {[...Array(4)].map((_, i) => <div key={i} className="h-64 bg-gray-300 rounded-3xl" />)}
+            </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               {data.products.map((p: any) => (
-                <div 
-                  key={p.id} 
-                  // 📍 商品カードクリック時に履歴を保存
-                  onClick={() => trackClick(p.category)}
-                  className="cursor-pointer border p-5 rounded-xl bg-white shadow-sm hover:shadow-md transition-shadow relative active:scale-[0.99]"
-                >
-                  <div className="flex justify-between items-start mb-2">
-                    <span className="text-[10px] uppercase bg-blue-50 text-blue-600 px-2 py-1 rounded font-bold">
-                      {p.category}
-                    </span>
-                    <span className="text-[8px] text-gray-300">Score: {p._score?.toFixed(2)}</span>
+                <div key={p.id} className="group border-2 border-gray-50 p-6 rounded-3xl bg-white hover:border-blue-500 transition-all relative">
+                  <div className="flex justify-between mb-4">
+                    <span className="text-[9px] uppercase bg-blue-50 px-2 py-1 rounded-md font-black text-blue-600">{p.category}</span>
+                    {currentSort === "recommended" && <span className="text-[10px] text-gray-300 font-mono">Score: {p._score?.toFixed(1)}</span>}
                   </div>
-
-                  <h3 
-                    className="font-bold mt-1 text-lg leading-tight"
-                    dangerouslySetInnerHTML={{ __html: p.name }}
-                  />
-                  
-                  <p 
-                    className="text-gray-500 text-sm mt-2 line-clamp-2 leading-relaxed"
-                    dangerouslySetInnerHTML={{ __html: p.description }}
-                  />
-                  
-                  <div className="flex items-baseline gap-2 mt-4">
-                    <p className="font-black text-xl text-gray-900">¥{Number(p.price).toLocaleString()}</p>
-                    {p.isSale && (
-                      <span className="text-xs font-bold text-red-500 px-1.5 py-0.5 border border-red-500 rounded">SALE</span>
-                    )}
+                  <h3 className="font-bold text-xl mb-2" dangerouslySetInnerHTML={{ __html: p.name }} />
+                  <p className="text-gray-400 text-sm line-clamp-2 mb-6" dangerouslySetInnerHTML={{ __html: p.description }} />
+                  <div className="flex items-end justify-between">
+                    <div>
+                      <p className="text-[10px] text-gray-400 font-bold uppercase">Price</p>
+                      <p className="font-black text-2xl text-gray-900">¥{Number(p.price).toLocaleString()}</p>
+                    </div>
+                    {p.isSale && <span className="bg-red-500 text-white text-[10px] px-3 py-1 rounded-full font-black shadow-lg shadow-red-200">SALE</span>}
                   </div>
                 </div>
               ))}
-              {data.products.length === 0 && (
-                <div className="col-span-full text-center py-20 text-gray-500">
-                   該当する商品は見つかりませんでした。
-                </div>
-              )}
             </div>
           )}
         </main>
@@ -184,7 +214,7 @@ function SearchContent() {
 
 export default function SearchPage() {
   return (
-    <Suspense fallback={<div className="p-10 text-center">Loading search interface...</div>}>
+    <Suspense fallback={<div className="p-10 text-center">Neural Search Initializing...</div>}>
       <SearchContent />
     </Suspense>
   );

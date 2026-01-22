@@ -12,6 +12,9 @@ export async function GET(request: Request) {
   const lat = searchParams.get("lat");
   const lon = searchParams.get("lon");
   const preferredCategory = searchParams.get("pref");
+  const sort = searchParams.get("sort");
+  // 📍 3001番（SaaS）側の解析結果を受け取る
+  const priceSensitivity = searchParams.get("price_sensitivity"); 
 
   try {
     const scoreFunctions: any[] = [
@@ -19,11 +22,41 @@ export async function GET(request: Request) {
       { field_value_factor: { field: "priority", factor: 1.0, missing: 0 } },
     ];
 
+    // 1. カテゴリ好みの反映
     if (preferredCategory) {
       scoreFunctions.push({
         filter: { term: { category: String(preferredCategory) } },
         weight: 10000,
       });
+    }
+
+    // 📍 2. SaaS連携：予算感（価格感度）の反映
+    // sensitivityが高い（正）＝ 安いもの好き / 低い（負）＝ 高いもの好き
+    if (priceSensitivity) {
+      const sensitivity = parseFloat(priceSensitivity);
+      if (sensitivity > 50) {
+        // 【節約家向け】価格が低いほどスコアを加算 (逆数を利用)
+        scoreFunctions.push({
+          field_value_factor: {
+            field: "price",
+            factor: 1.0,
+            modifier: "reciprocal", 
+            missing: 1
+          },
+          weight: 5000,
+        });
+      } else if (sensitivity < -50) {
+        // 【高級志向向け】価格が高いほどスコアを加算 (対数を利用)
+        scoreFunctions.push({
+          field_value_factor: {
+            field: "price",
+            factor: 0.0001,
+            modifier: "log1p", 
+            missing: 1
+          },
+          weight: 5000,
+        });
+      }
     }
 
     if (lat && lon) {
@@ -39,7 +72,6 @@ export async function GET(request: Request) {
       });
     }
 
-    // 📍 物理的なフィルタリング条件（post_filter用）
     const filterClauses: any[] = [];
     if (category) {
       if (category === "SALE") {
@@ -52,7 +84,6 @@ export async function GET(request: Request) {
     const esQuery: any = {
       index: "products",
       body: {
-        // 1. 検索ワードによる基本クエリとスコアリング
         query: {
           function_score: {
             query: {
@@ -68,7 +99,6 @@ export async function GET(request: Request) {
                       },
                     ]
                   : [{ match_all: {} }],
-                // 📍 ここではフィルタをかけない（集計対象を減らさないため）
                 filter: [], 
               },
             },
@@ -77,14 +107,11 @@ export async function GET(request: Request) {
             boost_mode: "sum",
           },
         },
-        // 📍 2. 【重要】商品の「表示」だけを最後に絞り込む
-        // これにより、aggs（集計）には影響を与えず、商品一覧だけが変わります。
         post_filter: {
           bool: {
             filter: filterClauses
           }
         },
-        // 3. ハイライト設定
         highlight: {
           fields: {
             name: {},
@@ -93,8 +120,6 @@ export async function GET(request: Request) {
           pre_tags: ["<b class='text-blue-600 font-bold'>"],
           post_tags: ["</b>"],
         },
-        // 4. カテゴリ集計
-        // post_filterのおかげで、ここには「絞り込み前」の母数が届きます。
         aggs: {
           categories: {
             terms: { field: "category", size: 50 },
@@ -102,6 +127,12 @@ export async function GET(request: Request) {
         },
       },
     };
+
+    if (sort === "price_asc") {
+      esQuery.body.sort = [{ price: { order: "asc" } }, "_score"];
+    } else if (sort === "price_desc") {
+      esQuery.body.sort = [{ price: { order: "desc" } }, "_score"];
+    }
 
     const response = await client.search(esQuery);
 
@@ -122,10 +153,7 @@ export async function GET(request: Request) {
   } catch (error) {
     console.error("Elasticsearch Search Error:", error);
     return NextResponse.json(
-      { 
-        error: "検索に失敗しました", 
-        details: error instanceof Error ? error.message : String(error) 
-      },
+      { error: "検索に失敗しました", details: error instanceof Error ? error.message : String(error) },
       { status: 500 }
     );
   }
