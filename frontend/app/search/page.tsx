@@ -17,7 +17,6 @@ function SearchContent() {
 
   const [inputValue, setInputValue] = useState(query);
 
-  // 依存配列の安定化（Reactのエラー対策）
   const searchParamsKey = searchParams.toString();
 
   const getPreferredCategory = () => {
@@ -27,7 +26,6 @@ function SearchContent() {
     return sorted.length > 0 ? sorted[0][0] : null;
   };
 
-  // 📍 SaaS解析と商品検索を統合したメインロジック
   const trackAndSearch = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams(searchParamsKey);
@@ -35,20 +33,19 @@ function SearchContent() {
     if (pref) params.set("pref", pref);
 
     try {
-      // 1. SaaS(3001番)への問い合わせ：今の検索条件から「出すべきポップアップ」を仰ぐ
+      // SaaSへの問い合わせ
       const trackRes = await fetch("http://localhost:3001/api/v1/track", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           event: "search_view",
-          vid: "guest_user_001",
+          vid: "browser_vid_001",
           userId: "admin_1",
-          properties: { q: query, sort: currentSort }
+          properties: { q: query, sort: currentSort, category: currentCategory }
         })
       });
       const trackData = await trackRes.json();
 
-      // インサイト判定があればセット（なければクリア）
       if (trackData.action?.displayPopUp) {
         setActivePromo({
           ...trackData.action.displayPopUp,
@@ -58,12 +55,10 @@ function SearchContent() {
         setActivePromo(null);
       }
 
-      // 2. 解析されたスコアを検索クエリに乗せる
       if (trackData.insights?.price_sensitivity) {
         params.set("price_sensitivity", trackData.insights.price_sensitivity);
       }
 
-      // 3. 商品検索の実行
       const res = await fetch(`/api/products/search?${params.toString()}`);
       const json = await res.json();
       setData({ products: json.products || [], aggregations: json.categories || [] });
@@ -72,7 +67,7 @@ function SearchContent() {
     } finally {
       setLoading(false);
     }
-  }, [searchParamsKey, query, currentSort]);
+  }, [searchParamsKey, query, currentSort, currentCategory]);
 
   useEffect(() => {
     setInputValue(query);
@@ -85,16 +80,22 @@ function SearchContent() {
     if (newCat) params.set("category", newCat);
     if (newSort && newSort !== "recommended") params.set("sort", newSort);
 
-    // ソート変更時は明示的にイベント送信（加減算のため）
-    if (newSort !== currentSort) {
+    // 📍 修正点：カテゴリ変更時も明示的にイベント送信
+    const isSortChanged = newSort !== currentSort;
+    const isCategoryChanged = newCat !== currentCategory;
+
+    if (isSortChanged || isCategoryChanged) {
       fetch("http://localhost:3001/api/v1/track", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          event: "change_sort",
-          vid: "guest_user_001",
+          event: isSortChanged ? "change_sort" : "change_category",
+          vid: "browser_vid_001",
           userId: "admin_1",
-          properties: { sort_type: newSort }
+          properties: { 
+            sort_type: newSort,
+            category: newCat // SaaS側はこの値を見て +10 点する
+          }
         })
       });
     }
@@ -104,8 +105,6 @@ function SearchContent() {
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto relative">
-      
-      {/* 📍 インサイト連動型ポップアップUI */}
       {activePromo && (
         <div className="fixed bottom-10 right-10 z-50 transform transition-all hover:scale-105">
           <div className={`p-6 rounded-3xl shadow-2xl max-w-sm border-4 ${
@@ -114,39 +113,23 @@ function SearchContent() {
               : "border-gray-100 bg-white"
           }`}>
             <button onClick={() => setActivePromo(null)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600">✕</button>
-            
             {activePromo.isInsight && (
               <div className="flex items-center gap-2 mb-3">
-                <span className="bg-orange-500 text-white text-[10px] font-black px-2 py-0.5 rounded-full animate-pulse">
-                  INSIGHT MATCH
-                </span>
+                <span className="bg-orange-500 text-white text-[10px] font-black px-2 py-0.5 rounded-full animate-pulse">INSIGHT MATCH</span>
                 <span className="text-[10px] text-orange-600 font-bold">検索傾向から提案</span>
               </div>
             )}
-
             <h4 className="font-black text-xl mb-1 text-gray-800">{activePromo.title}</h4>
             <p className="text-sm text-gray-600 mb-5 leading-relaxed">{activePromo.description}</p>
-            
             <button className={`w-full font-bold py-3 rounded-xl shadow-lg transition-all active:scale-95 ${
-              activePromo.isInsight 
-                ? "bg-orange-500 text-white hover:bg-orange-600" 
-                : "bg-blue-600 text-white hover:bg-blue-700"
-            }`}>
-              {activePromo.buttonText || "今すぐチェック"}
-            </button>
+              activePromo.isInsight ? "bg-orange-500 text-white hover:bg-orange-600" : "bg-blue-600 text-white hover:bg-blue-700"
+            }`}>{activePromo.buttonText || "今すぐチェック"}</button>
           </div>
         </div>
       )}
 
-      {/* 検索フォーム */}
       <form onSubmit={(e) => { e.preventDefault(); updateSearch(inputValue, currentCategory, currentSort); }} className="flex gap-2">
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder="検索..."
-          className="border p-3 flex-1 rounded-2xl shadow-inner outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50/50"
-        />
+        <input type="text" value={inputValue} onChange={(e) => setInputValue(e.target.value)} placeholder="検索..." className="border p-3 flex-1 rounded-2xl shadow-inner outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50/50" />
         <button type="submit" className="bg-gray-900 text-white px-8 py-3 rounded-2xl font-bold hover:bg-black transition-all shadow-lg">検索</button>
       </form>
 
@@ -170,17 +153,12 @@ function SearchContent() {
         <main className="flex-1">
           <div className="flex justify-between items-center mb-6">
             <p className="text-xs text-gray-400 font-bold tracking-widest uppercase">{data.products.length} Results</p>
-            <select 
-              value={currentSort}
-              onChange={(e) => updateSearch(inputValue, currentCategory, e.target.value)}
-              className="border bg-white text-xs font-bold p-2 rounded-xl shadow-sm outline-none focus:ring-2 focus:ring-blue-500"
-            >
+            <select value={currentSort} onChange={(e) => updateSearch(inputValue, currentCategory, e.target.value)} className="border bg-white text-xs font-bold p-2 rounded-xl shadow-sm outline-none focus:ring-2 focus:ring-blue-500">
               <option value="recommended">おすすめ順</option>
               <option value="price_asc">価格の安い順</option>
               <option value="price_desc">価格の高い順</option>
             </select>
           </div>
-
           {loading ? (
             <div className="grid grid-cols-2 gap-6 opacity-20 animate-pulse">
               {[...Array(4)].map((_, i) => <div key={i} className="h-64 bg-gray-300 rounded-3xl" />)}
@@ -196,10 +174,7 @@ function SearchContent() {
                   <h3 className="font-bold text-xl mb-2" dangerouslySetInnerHTML={{ __html: p.name }} />
                   <p className="text-gray-400 text-sm line-clamp-2 mb-6" dangerouslySetInnerHTML={{ __html: p.description }} />
                   <div className="flex items-end justify-between">
-                    <div>
-                      <p className="text-[10px] text-gray-400 font-bold uppercase">Price</p>
-                      <p className="font-black text-2xl text-gray-900">¥{Number(p.price).toLocaleString()}</p>
-                    </div>
+                    <div><p className="text-[10px] text-gray-400 font-bold uppercase">Price</p><p className="font-black text-2xl text-gray-900">¥{Number(p.price).toLocaleString()}</p></div>
                     {p.isSale && <span className="bg-red-500 text-white text-[10px] px-3 py-1 rounded-full font-black shadow-lg shadow-red-200">SALE</span>}
                   </div>
                 </div>
